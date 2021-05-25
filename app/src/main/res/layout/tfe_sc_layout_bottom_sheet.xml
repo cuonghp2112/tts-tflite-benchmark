@@ -255,20 +255,22 @@
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="33dp"
         android:orientation="horizontal">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:layout_gravity="left"
-            android:text="GPU" />
+        <Switch
+            android:id="@+id/dynamicswitch"
+            android:layout_width="70dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Dynamic input shape" />
 
         <Switch
             android:id="@+id/gpuswitch"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:gravity="right" />
+            android:gravity="right"
+            android:text="GPU OFF" />
     </LinearLayout>
 </LinearLayout>

@@ -1,4 +1,4 @@
-t rem/*
+/*
  * Copyright 2019 The TensorFlow Authors. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,17 +38,16 @@ import android.content.res.AssetManager;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
-import androidx.appcompat.widget.SwitchCompat;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
-//import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -58,7 +57,14 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.widget.SwitchCompat;
+
 import com.google.android.material.bottomsheet.BottomSheetBehavior;
+
+import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.CompatibilityList;
+import org.tensorflow.lite.gpu.GpuDelegate;
+import org.tensorflow.lite.nnapi.NnApiDelegate;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -74,15 +80,12 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
-import org.tensorflow.lite.Interpreter;
-import org.tensorflow.lite.gpu.CompatibilityList;
-import org.tensorflow.lite.gpu.GpuDelegate;
-import org.tensorflow.lite.nnapi.NnApiDelegate;
 
-import java.util.concurrent.LinkedBlockingQueue;
+//import android.widget.CheckBox;
 
 
 
@@ -103,8 +106,12 @@ public class SpeechActivity extends Activity
   private static Map<String,int[]> phone_files;
   private static Map<String,String> text_files;
 
-  private final int stream_len=32;
-  private final int overlap = 8;
+  private int stream_len=32;
+  private int overlap = 8;
+  private boolean dynamic_size = false;
+  private String encoder_model_nonfix_name = "fastspeech_encoder_nonfix";
+  private String encoder_model_fix_name = "fastspeech_encoder";
+  private CompatibilityList compatList = new CompatibilityList();
 
 
   // UI elements.
@@ -141,6 +148,8 @@ public class SpeechActivity extends Activity
   private Button playButton;
   private Button benchmarkButton;
   private Button loadModelButton;
+  private Spinner chunk_size;
+  private TextView overlap_size;
   private Spinner model_list;
   private Spinner text_list;
 //  private CheckBox checkBox;
@@ -148,6 +157,7 @@ public class SpeechActivity extends Activity
   private ImageView plusImageView, minusImageView;
   private SwitchCompat apiSwitchCompat;
   private Switch useGPU;
+  private Switch dynamic_shape;
   private TextView threadsTextView;
   private long lastProcessingTimeMs;
   private Handler handler = new Handler();
@@ -203,12 +213,16 @@ public class SpeechActivity extends Activity
     apiSwitchCompat = findViewById(R.id.api_info_switch);
 
     useGPU = findViewById(R.id.gpuswitch);
-    useGPU.setText("OFF");
+    useGPU.setText("GPU OFF");
     playButton = findViewById(R.id.button);
     benchmarkButton = findViewById(R.id.benchmark);
     loadModelButton = findViewById(R.id.load_model);
     apiSwitchCompat.setOnCheckedChangeListener(this);
 
+    chunk_size = findViewById(R.id.chunk_szie);
+    overlap_size = findViewById(R.id.overlap_size);
+
+    dynamic_shape = findViewById(R.id.dynamicswitch);
     sentence = findViewById(R.id.textView2);
     text_list = findViewById(R.id.spinner);
     model_list = findViewById(R.id.spinner2);
@@ -244,6 +258,11 @@ public class SpeechActivity extends Activity
     ArrayAdapter<String> adapterModel = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, models);
     model_list.setAdapter(adapterModel);
 
+    String[] chunk_size_list = {"32","64"};
+    ArrayAdapter<String> adapterChunksize = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, chunk_size_list);
+    chunk_size.setAdapter(adapterChunksize);
+    overlap_size.setText("8");
+    
     benchmarkButton.setOnClickListener(new View.OnClickListener() {
       @Override
       public void onClick(View v)
@@ -275,8 +294,16 @@ public class SpeechActivity extends Activity
         // true if the switch is in the On position
         if(isChecked){
           Log.v(LOG_TAG,"use GPU delegate");
-          recreateInterpreter();
-          useGPU.setText("GPU");
+          if (compatList.isDelegateSupportedOnThisDevice()) {
+            recreateInterpreter();
+            useGPU.setText("GPU");
+          } else{
+            useGPU.setChecked(false);
+            Toast.makeText(getApplicationContext(),
+                    "no gpu support",
+                    Toast.LENGTH_LONG/16)
+                    .show();
+          }
         } else {
           useGPU.setText("OFF");
         }
@@ -288,11 +315,23 @@ public class SpeechActivity extends Activity
       public void onClick(View v)
       {
         long startTime = new Date().getTime();
-        String model_name = (String) model_list.getSelectedItem();
+        String model_name =  model_list.getSelectedItem().toString();
+        int chunk_size_num = Integer.parseInt( chunk_size.getSelectedItem().toString());
+        stream_len = chunk_size_num;
+        overlap = (int) Double.parseDouble( overlap_size.getText().toString());
+        String melgan_name = "melgan_v3_32.tflite";
+        dynamic_size = dynamic_shape.isChecked();
         try {
-          tfLiteModel_encoder = loadModelFile(getAssets(), model_name+"/fastspeech_encoder.tflite");
+          String encoder_name = encoder_model_fix_name;
+          if (dynamic_size){
+            encoder_name = encoder_model_nonfix_name;
+          }
+          if (chunk_size_num==64){
+            melgan_name = "melgan.tflite";
+          }
+          tfLiteModel_encoder = loadModelFile(getAssets(),  model_name +"/"+encoder_name+".tflite");
           tfLiteModel_decoder = loadModelFile(getAssets(), model_name+"/fastspeech_decoder.tflite");
-          tfMelGan = loadModelFile(getAssets(), model_name+"/melgan_v3_32.tflite");
+          tfMelGan = loadModelFile(getAssets(), model_name+"/"+melgan_name);
           recreateInterpreter();
         } catch (Exception e) {
           throw new RuntimeException(e);
@@ -456,9 +495,11 @@ public class SpeechActivity extends Activity
     );
 
     int len_inp = tempInputBuffer.length;
-    int[] inputBuffer = new int[300];
-    int[] seq_pos = new int[300];
-    for (int i = 0; i < 300; ++i) {
+    final int input_size;
+    input_size = dynamic_size ? len_inp: 300;
+    int[] inputBuffer = new int[input_size];
+    int[] seq_pos = new int[input_size];
+    for (int i = 0; i < input_size; ++i) {
       if (i<len_inp){
         inputBuffer[i] = tempInputBuffer[i];
         seq_pos[i]=i;
@@ -481,8 +522,8 @@ public class SpeechActivity extends Activity
       inputMap[2]=len_inp;
 //    prepare output for encoder
       HashMap<Integer, Object> outputEncoder = new HashMap<>();
-      float[][][] outputEncode = new float[1][300][256];
-      int[][] duration = new int[1][300];
+      float[][][] outputEncode = new float[1][input_size][256];
+      int[][] duration = new int[1][input_size];
 //      int[] total_len = new int[1];
       outputEncoder.put(0,outputEncode);
       outputEncoder.put(1,duration);
@@ -501,6 +542,9 @@ public class SpeechActivity extends Activity
       // Run the fastspeech2 encoder.
       long startTime = new Date().getTime();
       tfLiteLock.lock();
+      tfLite_encoder.resizeInput(0, new int[] {input_size});
+      tfLite_encoder.resizeInput(1, new int[] {input_size});
+      tfLite_encoder.resizeInput(2, new int[] {1});
       run_encoder(inputMap,outputEncoder);
 
 //    prepare pinput decoder
@@ -825,25 +869,29 @@ public class SpeechActivity extends Activity
       boolean useNNAPI = apiSwitchCompat.getText()=="NNAPI";
       boolean usegpu = useGPU.getText()=="GPU";
       Interpreter.Options options = new Interpreter.Options();
-      CompatibilityList compatList = new CompatibilityList();
       if (useNNAPI) {
-        options.setUseNNAPI(true);
-      }
-      if (usegpu){
-      if(compatList.isDelegateSupportedOnThisDevice()){
-        // if the device has a supported GPU, add the GPU delegate
-        GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
-        GpuDelegate gpuDelegate = new GpuDelegate(delegateOptions);
-        options.addDelegate(gpuDelegate);
-        Log.v(LOG_TAG, "enable gpu delegate");
-      }
-      else {
-        Toast.makeText(getApplicationContext(),
-                "no gpu support",
-                Toast.LENGTH_LONG/2)
-                .show();
-        usegpu=false;
-      }
+//        options.setUseNNAPI(true);
+        NnApiDelegate nnApiDelegate = null;
+// Initialize interpreter with NNAPI delegate for Android Pie or above
+        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          nnApiDelegate = new NnApiDelegate();
+          options.addDelegate(nnApiDelegate);
+          Toast.makeText(getApplicationContext(),
+                  "use NNAPI",
+                  Toast.LENGTH_LONG/16)
+                  .show();
+        }
+      } else if (usegpu){
+          // if the device has a supported GPU, add the GPU delegate
+          GpuDelegate.Options delegateOptions = compatList.getBestOptionsForThisDevice();
+          GpuDelegate gpuDelegate = new GpuDelegate(delegateOptions);
+          options.addDelegate(gpuDelegate);
+          Log.v(LOG_TAG, "enable gpu delegate");
+          Toast.makeText(getApplicationContext(),
+                  "no gpu support",
+                  Toast.LENGTH_LONG/16)
+                  .show();
+          usegpu=false;
       }
       String threads = threadsTextView.getText().toString().trim();
       int numThreads = Integer.parseInt(threads);
@@ -851,28 +899,26 @@ public class SpeechActivity extends Activity
       melgantfLite = new Interpreter(tfMelGan, options);
 
       tfLiteOptions.setUseNNAPI(false);
-      tfLite_encoder = new Interpreter(tfLiteModel_encoder, tfLiteOptions);
+      tfLite_encoder = new Interpreter(tfLiteModel_encoder, options);
 
       tfLite_decoder = new Interpreter(tfLiteModel_decoder, tfLiteOptions);
       tfLite_encoder.resizeInput(0, new int[] {300});
       tfLite_encoder.allocateTensors();
       tfLite_decoder.allocateTensors();
-      melgantfLite.resizeInput(0,new int[]{1,32,80});
+      melgantfLite.resizeInput(0,new int[]{1,stream_len,80});
       melgantfLite.allocateTensors();
       String model = (String) model_list.getSelectedItem();
       long time =  (new Date()).getTime() - startTime;
       String message;
       if (usegpu && useNNAPI)
-        message = "Loaded " +model + " in " +time + "ms use: " + threads + " threads, use GPU and NNAPI";
-      else if (usegpu) {
-        message = "Loaded " + model + " in " + time + "ms use: " + threads + " threads, use GPU";
-      } else {
-        message = "Loaded " + model + " in " + time + "ms use: " + threads + " threads, use " + apiSwitchCompat.getText();
+        message = "Loaded " +model + " in " +time + "ms use: " + threads + " threads, use NNAPI, GPU: true, " +"chunk_size: " + stream_len + "overlap: " + overlap;
+      else {
+        message = "Loaded " + model + " in " + time + "ms use: " + threads + " threads, use " + apiSwitchCompat.getText() +",GPU: " + usegpu + ", chunk_size: " + stream_len + ", overlap: " + overlap;
       }
 
       Toast.makeText(getApplicationContext(),
               message,
-              Toast.LENGTH_LONG)
+              Toast.LENGTH_LONG/16)
               .show();
 
     } finally {

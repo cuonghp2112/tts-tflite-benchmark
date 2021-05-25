@@ -1,2 +1,2 @@
-rootProject.name = 'benchmark-tts'
+rootProject.name = 'benchmark-tts-tflite'
 include ':app'
